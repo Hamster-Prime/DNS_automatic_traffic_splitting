@@ -1,9 +1,5 @@
 build/
 build.ps1
-doh-autoproxy
-cmd/doh-autoproxy/doh-autoproxy
-doh-autoproxy.exe
-cmd/doh-autoproxy/doh-autoproxy.exe
 bin/
 config.yaml
 hosts.txt
