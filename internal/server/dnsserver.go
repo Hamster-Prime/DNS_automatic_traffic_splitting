@@ -99,6 +99,5 @@ func (h *DNSRequestHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	resp.SetRcode(req, resp.Rcode)
 	w.WriteMsg(resp)
 }

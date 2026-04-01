@@ -49,7 +49,7 @@ func VerifyGeoSite(path string) error {
 }
 
 func (g *GeoDataManager) IsCNIP(ip net.IP) bool {
-	if g.geoip == nil {
+	if g == nil || g.geoip == nil {
 		return false
 	}
 	codes := g.geoip.LookupCode(ip)
@@ -62,7 +62,7 @@ func (g *GeoDataManager) IsCNIP(ip net.IP) bool {
 }
 
 func (g *GeoDataManager) LookupGeoSite(domain string) string {
-	if g.geosite == nil {
+	if g == nil || g.geosite == nil {
 		return ""
 	}
 
