@@ -536,12 +536,12 @@
                                 <td class="px-4 py-2 text-slate-500 dark:text-slate-400 text-xs">{{ log.type }}</td>
                                 <td class="px-4 py-2 text-slate-600 dark:text-slate-300 font-mono text-xs truncate max-w-[200px]" :title="log.answer">{{ log.answer }}</td>
                                 <td class="px-4 py-2 whitespace-nowrap">
-                                    <span class="px-2 py-0.5 inline-flex text-xs leading-4 font-medium rounded-full" :class="getUpstreamClass(log.upstream)">
-                                        {{ log.upstream }}
+                                    <span class="px-2 py-0.5 inline-flex text-xs leading-4 font-medium rounded-full" :class="getUpstreamClass(log.upstream)" :title="formatUpstreamLabel(log.upstream)">
+                                        {{ formatUpstreamLabel(log.upstream) }}
                                     </span>
                                 </td>
                                 <td class="px-4 py-2 whitespace-nowrap">
-                                    <span class="px-2 py-0.5 rounded text-xs font-bold" :class="log.status === 'NOERROR' ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300'">{{ log.status }}</span>
+                                    <span class="px-2 py-0.5 rounded text-xs font-bold" :class="getLogStatusClass(log)">{{ getLogStatusText(log) }}</span>
                                 </td>
                                 <td class="px-4 py-2 whitespace-nowrap text-slate-500 dark:text-slate-400 font-mono text-xs">{{ log.duration_ms }}ms</td>
                             </tr>
@@ -958,8 +958,17 @@
                     <div class="col-span-2"><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_domain') }}</span> <span class="font-bold text-lg text-slate-900 dark:text-white break-all">{{ modal.log.domain }}</span></div>
                     <div><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_type') }}</span> <span class="font-mono bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-800 dark:text-slate-200">{{ modal.log.type }}</span></div>
                     <div><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_duration') }}</span> <span class="font-mono text-slate-800 dark:text-slate-200">{{ modal.log.duration_ms }}ms</span></div>
-                    <div><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_status') }}</span> <span class="font-bold" :class="modal.log.status === 'NOERROR' ? 'text-green-600' : 'text-red-600'">{{ modal.log.status }}</span></div>
-                    <div><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_upstream') }}</span> <span class="font-medium text-blue-600 dark:text-blue-400">{{ modal.log.upstream }}</span></div>
+                    <div>
+                        <span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_status') }}</span>
+                        <span class="font-bold" :class="getLogStatusTextColor(modal.log)">{{ getLogStatusText(modal.log) }}</span>
+                        <span v-if="isCompatNoDataLog(modal.log)" class="ml-2 text-xs text-slate-400 dark:text-slate-500">{{ t('raw_status') }} {{ modal.log.status }}</span>
+                    </div>
+                    <div><span class="text-slate-500 dark:text-slate-400 block text-xs uppercase">{{ t('log_upstream') }}</span> <span class="font-medium text-blue-600 dark:text-blue-400">{{ formatUpstreamLabel(modal.log.upstream) }}</span></div>
+                </div>
+
+                <div v-if="getLogExplanation(modal.log)" class="rounded-xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-200">
+                    <div class="font-semibold mb-1">{{ t('query_interpretation') }}</div>
+                    <p>{{ getLogExplanation(modal.log) }}</p>
                 </div>
                 
                 <div class="border-t border-slate-200 dark:border-slate-800 pt-4">
@@ -989,7 +998,7 @@
                         <div v-if="!modal.log.answer_records || modal.log.answer_records.length === 0" class="relative flex items-start">
                              <div class="relative z-10 w-4 h-4 rounded-full bg-slate-400 border-2 border-white dark:border-slate-900 mt-1 mr-4 shrink-0"></div>
                              <div class="flex-1 min-w-0">
-                                <p class="text-sm text-slate-500 italic">{{ modal.log.answer || 'No Answer' }}</p>
+                                <p class="text-sm text-slate-500 italic">{{ getLogAnswerSummary(modal.log) }}</p>
                             </div>
                         </div>
                      </div>
@@ -1114,6 +1123,13 @@ const i18nData = {
         blocked_msg: "已添加到 Hosts 黑名单。请点击顶部的 '保存并应用' 以生效。",
         unblocked_msg: "已从 Hosts 黑名单移除。请点击顶部的 '保存并应用' 以生效。",
         no_records: "暂无记录",
+        no_answer: "无返回记录",
+        query_interpretation: "查询说明",
+        raw_status: "原始状态",
+        status_compat_fallback: "兼容回退",
+        service_binding_query_hint_compat: "这是 RFC 9460 定义的 HTTPS/SVCB 服务绑定查询名（形如 _端口._https.主机名）。当前未返回专用 HTTPS/SVCB 记录，但基础主机仍然存在，系统已将结果改写为空答复，便于客户端继续回退到常规地址解析。",
+        service_binding_query_hint_nxdomain: "这是 RFC 9460 定义的 HTTPS/SVCB 服务绑定查询名（形如 _端口._https.主机名）。当前上游直接返回 NXDOMAIN，通常表示该端口没有单独发布对应的 HTTPS/SVCB 记录。",
+        service_binding_fallback_msg: "未返回 HTTPS/SVCB 记录，已执行兼容回退，客户端可继续走常规地址解析。",
         prev: "上一页",
         next: "下一页"
     },
@@ -1212,6 +1228,13 @@ const i18nData = {
         blocked_msg: "Added to Hosts blacklist. Please click 'Save & Apply' at the top to take effect.",
         unblocked_msg: "Removed from Hosts blacklist. Please click 'Save & Apply' at the top to take effect.",
         no_records: "No records found",
+        no_answer: "No records returned",
+        query_interpretation: "Query Interpretation",
+        raw_status: "Raw status",
+        status_compat_fallback: "Compat Fallback",
+        service_binding_query_hint_compat: "This is an RFC 9460 HTTPS/SVCB service-binding query name in the form _port._https.hostname. No dedicated HTTPS/SVCB record was returned, but the origin host still exists, so the result was rewritten to NODATA so clients can continue with normal address fallback.",
+        service_binding_query_hint_nxdomain: "This is an RFC 9460 HTTPS/SVCB service-binding query name in the form _port._https.hostname. The upstream returned NXDOMAIN directly, which usually means that no dedicated HTTPS/SVCB record is published for that port.",
+        service_binding_fallback_msg: "No HTTPS/SVCB record was returned. Compatibility fallback was applied so the client can continue with normal address resolution.",
         prev: "Previous",
         next: "Next"
     }
@@ -1421,8 +1444,51 @@ const app = Vue.createApp({
             if (!total) return 0;
             return ((part / total) * 100).toFixed(1);
         },
+        isCompatNoDataLog(log) {
+            return !!(log && log.upstream && log.upstream.includes('Compat-NODATA'));
+        },
+        isServiceBindingLog(log) {
+            if (!log) return false;
+            const type = (log.type || '').toUpperCase();
+            const domain = (log.domain || '').toLowerCase();
+            return (type === 'HTTPS' || type === 'SVCB') && domain.startsWith('_');
+        },
+        formatUpstreamLabel(upstream) {
+            if (!upstream) return '-';
+            if (upstream.includes('/Compat-NODATA')) {
+                return upstream.replace('/Compat-NODATA', this.lang === 'zh' ? ' / HTTPS兼容回退' : ' / HTTPS fallback');
+            }
+            return upstream;
+        },
+        getLogStatusClass(log) {
+            if (this.isCompatNoDataLog(log)) {
+                return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
+            }
+            return log && log.status === 'NOERROR'
+                ? 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300'
+                : 'bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300';
+        },
+        getLogStatusTextColor(log) {
+            if (this.isCompatNoDataLog(log)) return 'text-amber-600 dark:text-amber-300';
+            return log && log.status === 'NOERROR' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+        },
+        getLogStatusText(log) {
+            if (!log) return '-';
+            if (this.isCompatNoDataLog(log)) return this.t('status_compat_fallback');
+            return log.status || '-';
+        },
+        getLogAnswerSummary(log) {
+            if (this.isCompatNoDataLog(log)) return this.t('service_binding_fallback_msg');
+            return (log && log.answer) || this.t('no_answer');
+        },
+        getLogExplanation(log) {
+            if (this.isCompatNoDataLog(log)) return this.t('service_binding_query_hint_compat');
+            if (this.isServiceBindingLog(log) && log.status === 'NXDOMAIN') return this.t('service_binding_query_hint_nxdomain');
+            return '';
+        },
         getUpstreamClass(u) {
             if(!u) return "bg-gray-100 text-gray-800";
+            if(u.includes("Compat-NODATA")) return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
             if(u.includes("CN") || u.includes("Domestic")) return "bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300";
             if(u.includes("Overseas")) return "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300";
             if(u.includes("Hosts")) return "bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300";

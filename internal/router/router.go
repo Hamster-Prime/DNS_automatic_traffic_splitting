@@ -103,6 +103,9 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 
 	downstreamECS := client.ExtractECS(req)
 	resp, upstream, err := r.routeInternal(ctx, req)
+	if err == nil && resp != nil {
+		resp, upstream = r.normalizeServiceBindingNegativeResponse(ctx, req, resp, upstream)
+	}
 
 	duration := time.Since(start).Milliseconds()
 
@@ -171,6 +174,64 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 	}
 
 	return resp, err
+}
+
+func isServiceBindingQuestion(req *dns.Msg) bool {
+	if len(req.Question) == 0 {
+		return false
+	}
+
+	qType := req.Question[0].Qtype
+	return qType == dns.TypeHTTPS || qType == dns.TypeSVCB
+}
+
+func newExistenceCheckRequest(req *dns.Msg, qName string) *dns.Msg {
+	checkReq := new(dns.Msg)
+	checkReq.SetQuestion(dns.Fqdn(qName), dns.TypeA)
+	checkReq.Id = req.Id
+	checkReq.RecursionDesired = req.RecursionDesired
+	checkReq.CheckingDisabled = req.CheckingDisabled
+
+	if opt := req.IsEdns0(); opt != nil {
+		checkReq.SetEdns0(opt.UDPSize(), opt.Do())
+	}
+
+	return checkReq
+}
+
+func synthesizeNoDataResponse(req *dns.Msg, resp *dns.Msg) *dns.Msg {
+	normalized := resp.Copy()
+	normalized.Rcode = dns.RcodeSuccess
+	normalized.Answer = nil
+	normalized.Ns = nil
+	normalized.Extra = nil
+	for _, extra := range resp.Extra {
+		if extra.Header().Rrtype == dns.TypeOPT {
+			normalized.Extra = append(normalized.Extra, dns.Copy(extra))
+		}
+	}
+	normalized.Question = append([]dns.Question(nil), req.Question...)
+	return normalized
+}
+
+func (r *Router) normalizeServiceBindingNegativeResponse(ctx context.Context, req, resp *dns.Msg, upstream string) (*dns.Msg, string) {
+	if resp == nil || resp.Rcode != dns.RcodeNameError || !isServiceBindingQuestion(req) {
+		return resp, upstream
+	}
+
+	candidates := matchNames(req.Question[0].Name)
+	if len(candidates) <= 1 {
+		return resp, upstream
+	}
+
+	originName := candidates[len(candidates)-1]
+	checkReq := newExistenceCheckRequest(req, originName)
+	checkResp, _, err := r.routeInternal(ctx, checkReq)
+	if err != nil || checkResp == nil || checkResp.Rcode != dns.RcodeSuccess {
+		return resp, upstream
+	}
+
+	return synthesizeNoDataResponse(req, resp), upstream + "/Compat-NODATA"
 }
 
 // matchNames returns the original qname plus progressively stripped variants

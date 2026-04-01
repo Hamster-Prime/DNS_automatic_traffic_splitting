@@ -147,3 +147,73 @@ func TestHostOverrideOnlyAppliesToAddressQueries(t *testing.T) {
 		t.Fatalf("expected HTTPS query not to be answered by hosts override, got %#v", resp)
 	}
 }
+
+func TestRouteConvertsServiceBindingNXDOMAINToNoDataWhenOriginExists(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion("_7826._https.broadcast.chat.bilibili.com.", dns.TypeHTTPS)
+
+	nxResp := new(dns.Msg)
+	nxResp.SetRcode(req, dns.RcodeNameError)
+
+	r := &Router{
+		config: &config.Config{
+			Rules: map[string]string{
+				"broadcast.chat.bilibili.com": "cn",
+			},
+			Hosts: map[string]string{
+				"broadcast.chat.bilibili.com": "1.2.3.4",
+			},
+		},
+		cnClients: []client.DNSClient{
+			fakeDNSClient{resp: nxResp},
+		},
+	}
+
+	resp, err := r.Route(context.Background(), req, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected a DNS response")
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected NOERROR after compatibility rewrite, got %d", resp.Rcode)
+	}
+	if len(resp.Answer) != 0 {
+		t.Fatalf("expected empty answer section, got %d records", len(resp.Answer))
+	}
+	if len(resp.Ns) != 0 {
+		t.Fatalf("expected no authority section, got %d records", len(resp.Ns))
+	}
+}
+
+func TestRouteKeepsServiceBindingNXDOMAINWhenOriginMissing(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion("_7826._https.broadcast.chat.bilibili.com.", dns.TypeHTTPS)
+
+	nxResp := new(dns.Msg)
+	nxResp.SetRcode(req, dns.RcodeNameError)
+
+	r := &Router{
+		config: &config.Config{
+			Rules: map[string]string{
+				"broadcast.chat.bilibili.com": "cn",
+			},
+			Hosts: map[string]string{},
+		},
+		cnClients: []client.DNSClient{
+			fakeDNSClient{resp: nxResp},
+		},
+	}
+
+	resp, err := r.Route(context.Background(), req, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected a DNS response")
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("expected NXDOMAIN to be preserved, got %d", resp.Rcode)
+	}
+}
