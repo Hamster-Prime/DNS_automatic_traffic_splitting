@@ -1,104 +1,71 @@
-# config.yaml.example
+# Example configuration for doh-autoproxy.
 
-# 服务监听配置
-# 仅需填写端口号，系统会自动处理监听地址
 listen:
   dns_udp: "53"
   dns_tcp: "53"
   doh: "443"
-  doh_path: "/dns-query" # 自定义 DoH 路径，默认为 /dns-query
+  doh_path: "/dns-query"
   dot: "853"
   doq: "853"
 
-# 自动证书申请 (Let's Encrypt)
-# 如果启用，tls_certificates 和 server.crt/server.key 将被忽略，证书将自动管理。
-# 注意：需要公网 80 和 443 端口可访问。
 auto_cert:
   enabled: false
-  email: "your-email@example.com" # 用于接收证书过期通知
+  email: "your-email@example.com"
   domains:
     - "dns.example.com"
-  cert_dir: "certs" # 证书缓存目录
+  cert_dir: "certs"
 
-# 手动证书配置 (多证书支持)
-# 当 auto_cert 为 false 时生效。
-# 可以配置多个证书，例如分别用于域名和IP。
-# 如果此项留空，将尝试加载默认的 server.crt 和 server.key。
 tls_certificates:
-  # 示例：域名证书
-  - cert_file: "certs/example.com.crt"
-    key_file: "certs/example.com.key"
-  # 示例：IP证书
-  - cert_file: "certs/192.168.1.100.crt"
-    key_file: "certs/192.168.1.100.key"
+  # - cert_file: "certs/example.com.crt"
+  #   key_file: "certs/example.com.key"
 
-# Bootstrap DNS (用于解析上游服务器域名)
 bootstrap_dns:
   - "223.5.5.5:53"
-  - "8.8.8.8:53"
+  - "tcp://8.8.8.8:53" # optional: omit tcp:// to use UDP by default
 
-# 上游服务器配置
 upstreams:
   cn:
-    # 示例：国内UDP DNS
-    - address: "223.5.5.5" # 自动补全为 223.5.5.5:53
+    - address: "223.5.5.5"
       protocol: "udp"
       ecs_ip: "114.114.114.114"
-    # 示例：国内DoT DNS (开启Pipelining)
-    - address: "223.6.6.6" # 自动补全为 tls://223.6.6.6:853
+    - address: "223.6.6.6"
       protocol: "dot"
       ecs_ip: "114.114.114.114"
       pipeline: true
       insecure_skip_verify: false
   overseas:
-    # 示例：海外DoH DNS (支持H3, 验证证书)
-    - address: "1.1.1.1" # 自动补全为 https://1.1.1.1/dns-query
+    - address: "1.1.1.1"
       protocol: "doh"
       ecs_ip: "8.8.8.8"
       http3: true
       insecure_skip_verify: false
-    # 示例：海外DoT DNS (开启Pipelining)
-    - address: "8.8.8.8" # 自动补全为 tls://8.8.8.8:853
+    - address: "8.8.8.8"
       protocol: "dot"
       ecs_ip: "8.8.8.8"
       pipeline: true
-    # 示例：海外DoQ DNS
-    - address: "dns.nextdns.io" # 自动补全为 quic://dns.nextdns.io:853
+    - address: "dns.nextdns.io"
       protocol: "doq"
       ecs_ip: "8.8.8.8"
 
-# GeoIP/GeoSite数据文件路径及下载地址
 geo_data:
   geoip_dat: "GeoIP.dat"
   geosite_dat: "GeoSite.dat"
   geoip_download_url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
   geosite_download_url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  auto_update: "04:00"
 
-# Web管理界面配置
 web_ui:
   enabled: true
-  address: ":8080" # WebUI 监听地址，例如 ":8080"
-  username: ""     # 可选：WebUI 登录用户名。若留空，则所有人拥有完全控制权。
-  password: ""     # 可选：WebUI 登录密码。若设置了账号密码，未登录用户将进入“游客模式”（只读）。
-  # cert_file: "/path/to/your/webui.crt" # 可选：WebUI TLS 证书文件路径
-  # key_file: "/path/to/your/webui.key"   # 可选：WebUI TLS 密钥文件路径
+  address: ":8080"
+  username: ""
+  password: ""
+  guest_mode: false
+  # cert_file: ""
+  # key_file: ""
 
-# 日志配置
 query_log:
   enabled: true
-  max_history: 5000    # 内存/UI中保留的日志条数
-  save_to_file: false  # 是否将日志持久化保存到文件
-  file: "query.log"    # 日志文件路径
-
-# 注意：
-# 自定义Hosts配置请在程序运行目录下创建 'hosts.txt' 文件。
-# 格式: IP 域名 (标准hosts格式)
-# 示例:
-# 127.0.0.1 example.com
-# 0.0.0.0   ads.example.com
-
-# 自定义分流规则请在程序运行目录下创建 'rule.txt' 文件。
-# 格式: 域名 策略 (cn 或 overseas)
-# 示例:
-# google.com overseas
-# baidu.com cn
+  max_history: 5000
+  save_to_file: false
+  file: "query.log"
+  max_size_mb: 1

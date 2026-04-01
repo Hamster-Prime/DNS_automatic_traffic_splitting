@@ -1,3 +1,4 @@
+.vscode
 build/
 build.ps1
 config.yaml

@@ -17,6 +17,7 @@ type LogEntry struct {
 	ID            int64          `json:"id"`
 	Time          time.Time      `json:"time"`
 	ClientIP      string         `json:"client_ip"`
+	DownstreamECS string         `json:"downstream_ecs,omitempty"`
 	Domain        string         `json:"domain"`
 	Type          string         `json:"type"`
 	Upstream      string         `json:"upstream"`
@@ -259,6 +260,7 @@ func (l *QueryLogger) GetLogs(offset, limit int, search string) ([]*LogEntry, in
 
 		if searchLower != "" {
 			match := strings.Contains(strings.ToLower(entry.ClientIP), searchLower) ||
+				strings.Contains(strings.ToLower(entry.DownstreamECS), searchLower) ||
 				strings.Contains(strings.ToLower(entry.Domain), searchLower) ||
 				strings.Contains(strings.ToLower(entry.Type), searchLower) ||
 				strings.Contains(strings.ToLower(entry.Upstream), searchLower) ||
@@ -370,6 +372,7 @@ func matches(entry *LogEntry, searchLower string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(entry.ClientIP), searchLower) ||
+		strings.Contains(strings.ToLower(entry.DownstreamECS), searchLower) ||
 		strings.Contains(strings.ToLower(entry.Domain), searchLower) ||
 		strings.Contains(strings.ToLower(entry.Type), searchLower) ||
 		strings.Contains(strings.ToLower(entry.Upstream), searchLower) ||

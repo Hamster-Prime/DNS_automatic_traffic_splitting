@@ -101,6 +101,7 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 		return nil, fmt.Errorf("no question")
 	}
 
+	downstreamECS := client.ExtractECS(req)
 	resp, upstream, err := r.routeInternal(ctx, req)
 
 	duration := time.Since(start).Milliseconds()
@@ -146,6 +147,7 @@ func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns
 	if r.logger != nil {
 		r.logger.AddLog(&querylog.LogEntry{
 			ClientIP:      clientIP,
+			DownstreamECS: downstreamECS,
 			Domain:        qName,
 			Type:          qType,
 			Upstream:      upstream,
@@ -235,9 +237,9 @@ func (r *Router) routeInternal(ctx context.Context, req *dns.Msg) (*dns.Msg, str
 
 	// GeoSite 未命中：同时查询国内和海外 DNS，根据结果判断
 	type dualResult struct {
-		resp     *dns.Msg
-		err      error
-		source   string
+		resp   *dns.Msg
+		err    error
+		source string
 	}
 
 	dualCh := make(chan dualResult, 2)

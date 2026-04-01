@@ -1,213 +1,452 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Exit immediately if a command exits with a non-zero status.
-set -e
+set -euo pipefail
 
-# --- Configuration ---
 readonly REPO="Hamster-Prime/DNS_automatic_traffic_splitting"
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/doh-autoproxy"
-readonly BINARY_NAME="doh-autoproxy"
 readonly SERVICE_NAME="doh-autoproxy"
+readonly BINARY_NAME="doh-autoproxy"
+readonly SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+readonly RELEASE_BASE_URL="https://github.com/${REPO}/releases/latest/download"
+readonly PROGRAM_NAME="${0##*/}"
 
-# --- Colors ---
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[0;33m'
-readonly PLAIN='\033[0m'
+if [ -t 1 ]; then
+  readonly COLOR_RED=$'\033[0;31m'
+  readonly COLOR_GREEN=$'\033[0;32m'
+  readonly COLOR_YELLOW=$'\033[0;33m'
+  readonly COLOR_RESET=$'\033[0m'
+else
+  readonly COLOR_RED=""
+  readonly COLOR_GREEN=""
+  readonly COLOR_YELLOW=""
+  readonly COLOR_RESET=""
+fi
 
-# --- Helper Functions ---
-msg_info() {
-    echo -e "${GREEN}[INFO]${PLAIN} $1"
-}
-msg_warn() {
-    echo -e "${YELLOW}[WARN]${PLAIN} $1"
-}
-msg_err() {
-    echo -e "${RED}[ERROR]${PLAIN} $1"
-    exit 1
-}
+OS=""
+ARCH=""
+ASSET_NAME=""
+DOWNLOAD_TOOL=""
+SYSTEMD_READY=0
+SERVICE_FILE_WRITTEN=0
 
-# --- Pre-flight Checks ---
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        msg_err "请使用 root 权限运行此脚本 (e.g., sudo $0 install)"
-    fi
-}
-
-check_deps() {
-    if ! command -v curl &> /dev/null; then
-        msg_err "'curl' 未安装，请先安装它 (e.g., sudo apt update && sudo apt install curl)"
-    fi
-    if ! command -v jq &> /dev/null; {
-        msg_warn "'jq' 未安装，将尝试自动安装..."
-        if command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y jq
-        elif command -v yum &> /dev/null; then
-            yum install -y jq
-        elif command -v dnf &> /dev/null; then
-            dnf install -y jq
-        else
-            msg_err "无法自动安装 'jq'。请手动安装后再运行此脚本。"
-        fi
-    }
+info() {
+  printf "%s[INFO]%s %s\n" "$COLOR_GREEN" "$COLOR_RESET" "$*"
 }
 
-check_sys() {
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) ARCH="amd64" ;;
-        aarch64) ARCH="arm64" ;;
-        *) msg_err "不支持的架构: $ARCH" ;;
-    esac
-    OS="linux"
-    msg_info "检测到系统: $OS/$ARCH"
+warn() {
+  printf "%s[WARN]%s %s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$*"
 }
 
-# --- Core Functions ---
-get_latest_version() {
-    msg_info "正在获取最新版本信息..."
-    LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.tag_name')
-    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
-        msg_err "获取最新版本失败，请检查网络或 GitHub API 速率限制。"
-    fi
-    msg_info "最新版本: $LATEST_TAG"
+error() {
+  printf "%s[ERROR]%s %s\n" "$COLOR_RED" "$COLOR_RESET" "$*" >&2
+}
+
+die() {
+  error "$@"
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+require_root() {
+  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    die "Please run this script as root. Example: sudo bash ${PROGRAM_NAME} install"
+  fi
+}
+
+ensure_download_tool() {
+  if command_exists curl; then
+    DOWNLOAD_TOOL="curl"
+  elif command_exists wget; then
+    DOWNLOAD_TOOL="wget"
+  else
+    die "curl or wget is required."
+  fi
+}
+
+download_file() {
+  local url="$1"
+  local dest="$2"
+
+  case "$DOWNLOAD_TOOL" in
+    curl)
+      curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 -o "$dest" "$url"
+      ;;
+    wget)
+      wget -q -O "$dest" "$url"
+      ;;
+    *)
+      die "No download tool is available."
+      ;;
+  esac
+}
+
+detect_platform() {
+  local os_name
+  local arch_name
+
+  os_name="$(uname -s 2>/dev/null || true)"
+  arch_name="$(uname -m 2>/dev/null || true)"
+
+  case "$os_name" in
+    Linux)
+      OS="linux"
+      ;;
+    *)
+      die "This installer only supports Linux. Detected OS: ${os_name:-unknown}"
+      ;;
+  esac
+
+  case "$arch_name" in
+    x86_64|amd64)
+      ARCH="amd64"
+      ;;
+    aarch64|arm64)
+      ARCH="arm64"
+      ;;
+    i386|i686)
+      ARCH="386"
+      ;;
+    *)
+      die "Unsupported architecture: ${arch_name:-unknown}"
+      ;;
+  esac
+
+  ASSET_NAME="${BINARY_NAME}-${OS}-${ARCH}"
+  info "Detected platform: ${OS}/${ARCH}"
 }
 
 install_binary() {
-    get_latest_version
-    local download_url="https://github.com/$REPO/releases/download/$LATEST_TAG/doh-autoproxy-$OS-$ARCH"
-    
-    msg_info "正在下载: $download_url"
-    curl -L -o "$INSTALL_DIR/$BINARY_NAME" "$download_url"
-    if [ $? -ne 0 ]; then
-        msg_err "下载失败！"
-    fi
-    
-    chmod +x "$INSTALL_DIR/$BINARY_NAME"
-    msg_info "主程序已安装/更新至 $INSTALL_DIR/$BINARY_NAME"
+  local tmp_file
+  local target_path="${INSTALL_DIR}/${BINARY_NAME}"
+
+  mkdir -p "$INSTALL_DIR"
+  tmp_file="$(mktemp "${TMPDIR:-/tmp}/${BINARY_NAME}.XXXXXX")"
+
+  info "Downloading ${ASSET_NAME} from GitHub Releases..."
+  download_file "${RELEASE_BASE_URL}/${ASSET_NAME}" "$tmp_file"
+
+  install -m 0755 "$tmp_file" "$target_path"
+  rm -f "$tmp_file"
+
+  info "Binary installed to ${target_path}"
 }
 
-install_service_file() {
-    msg_info "正在配置 Systemd 服务..."
-    cat <<EOF > /etc/systemd/system/$SERVICE_NAME.service
+write_example_config() {
+  local example_path="${CONFIG_DIR}/config.yaml.example"
+
+  cat > "$example_path" <<'EOF'
+# Example configuration for doh-autoproxy.
+
+listen:
+  dns_udp: "53"
+  dns_tcp: "53"
+  doh: "443"
+  doh_path: "/dns-query"
+  dot: "853"
+  doq: "853"
+
+auto_cert:
+  enabled: false
+  email: "your-email@example.com"
+  domains:
+    - "dns.example.com"
+  cert_dir: "certs"
+
+tls_certificates:
+  # - cert_file: "certs/example.com.crt"
+  #   key_file: "certs/example.com.key"
+
+bootstrap_dns:
+  - "223.5.5.5:53"
+  - "tcp://8.8.8.8:53" # optional: omit tcp:// to use UDP by default
+
+upstreams:
+  cn:
+    - address: "223.5.5.5"
+      protocol: "udp"
+      ecs_ip: "114.114.114.114"
+    - address: "223.6.6.6"
+      protocol: "dot"
+      ecs_ip: "114.114.114.114"
+      pipeline: true
+      insecure_skip_verify: false
+  overseas:
+    - address: "1.1.1.1"
+      protocol: "doh"
+      ecs_ip: "8.8.8.8"
+      http3: true
+      insecure_skip_verify: false
+    - address: "8.8.8.8"
+      protocol: "dot"
+      ecs_ip: "8.8.8.8"
+      pipeline: true
+    - address: "dns.nextdns.io"
+      protocol: "doq"
+      ecs_ip: "8.8.8.8"
+
+geo_data:
+  geoip_dat: "GeoIP.dat"
+  geosite_dat: "GeoSite.dat"
+  geoip_download_url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  geosite_download_url: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  auto_update: "04:00"
+
+web_ui:
+  enabled: true
+  address: ":8080"
+  username: ""
+  password: ""
+  guest_mode: false
+  # cert_file: ""
+  # key_file: ""
+
+query_log:
+  enabled: true
+  max_history: 5000
+  save_to_file: false
+  file: "query.log"
+  max_size_mb: 1
+EOF
+}
+
+write_hosts_template() {
+  local hosts_path="${CONFIG_DIR}/hosts.txt"
+
+  if [ -f "$hosts_path" ]; then
+    return
+  fi
+
+  cat > "$hosts_path" <<'EOF'
+# Format:
+# 127.0.0.1 example.com
+# 0.0.0.0 ads.example.com
+EOF
+}
+
+write_rules_template() {
+  local rules_path="${CONFIG_DIR}/rule.txt"
+
+  if [ -f "$rules_path" ]; then
+    return
+  fi
+
+  cat > "$rules_path" <<'EOF'
+# Format:
+# google.com overseas
+# baidu.com cn
+# regexp:.*\.example\.com overseas
+EOF
+}
+
+install_config() {
+  local config_path="${CONFIG_DIR}/config.yaml"
+  local example_path="${CONFIG_DIR}/config.yaml.example"
+
+  mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/certs"
+
+  write_example_config
+
+  if [ ! -f "$config_path" ]; then
+    cp "$example_path" "$config_path"
+    info "Created ${config_path}"
+  else
+    warn "Keeping existing config: ${config_path}"
+  fi
+
+  write_hosts_template
+  write_rules_template
+
+  info "Configuration directory is ready: ${CONFIG_DIR}"
+}
+
+write_service_file() {
+  local service_dir
+
+  service_dir="$(dirname "$SERVICE_FILE")"
+  SERVICE_FILE_WRITTEN=0
+
+  if ! command_exists systemctl && [ ! -d "$service_dir" ]; then
+    warn "systemd was not detected. Skipping service file generation."
+    return
+  fi
+
+  mkdir -p "$service_dir"
+
+  cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=DNS Automatic Traffic Splitting Service
-After=network.target network-online.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 Group=root
-WorkingDirectory=$CONFIG_DIR
-ExecStart=$INSTALL_DIR/$BINARY_NAME
+WorkingDirectory=${CONFIG_DIR}
+Environment=DOH_AUTOPROXY_CONFIG=${CONFIG_DIR}/config.yaml
+ExecStart=${INSTALL_DIR}/${BINARY_NAME}
 Restart=on-failure
-RestartSec=5
+RestartSec=5s
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-Environment="DOH_AUTOPROXY_CONFIG=$CONFIG_DIR/config.yaml"
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    msg_info "Systemd 服务文件已创建/更新。"
+  SERVICE_FILE_WRITTEN=1
+  info "Systemd service file written to ${SERVICE_FILE}"
 }
 
-install_config() {
-    msg_info "正在配置文件夹..."
-    mkdir -p "$CONFIG_DIR"
-    
-    local example_config_path="$CONFIG_DIR/config.yaml.example"
-    local config_path="$CONFIG_DIR/config.yaml"
-    
-    msg_info "正在下载最新配置文件模板..."
-    curl -L -o "$example_config_path" "https://raw.githubusercontent.com/$REPO/main/config.yaml.example"
-    
-    if [ ! -f "$config_path" ]; then
-        cp "$example_config_path" "$config_path"
-        msg_info "已创建默认配置文件: $config_path"
-    else
-        msg_warn "检测到已存在配置文件 $config_path，未进行覆盖。"
-        msg_warn "你可以参考 ${example_config_path} 手动更新配置。"
-    fi
-    
-    touch "$CONFIG_DIR/hosts.txt"
-    touch "$CONFIG_DIR/rule.txt"
-    msg_info "配置文件夹初始化完成: $CONFIG_DIR"
+reload_and_enable_service() {
+  SYSTEMD_READY=0
+
+  if [ "$SERVICE_FILE_WRITTEN" -ne 1 ]; then
+    warn "Service file was not created. Service management was skipped."
+    return
+  fi
+
+  if ! command_exists systemctl; then
+    warn "systemctl was not found. The binary is installed, but service management was skipped."
+    return
+  fi
+
+  if systemctl daemon-reload && systemctl enable "$SERVICE_NAME" >/dev/null 2>&1; then
+    SYSTEMD_READY=1
+    info "Systemd service has been reloaded and enabled."
+  else
+    warn "systemd is installed but not usable in this environment. Service management was skipped."
+  fi
 }
 
-# --- Action Functions ---
+restart_service_if_needed() {
+  local was_active="$1"
+
+  if [ "$SYSTEMD_READY" -ne 1 ]; then
+    warn "Start the service manually after editing ${CONFIG_DIR}/config.yaml."
+    warn "You can also run the binary directly: ${INSTALL_DIR}/${BINARY_NAME}"
+    return
+  fi
+
+  if [ "$was_active" -eq 1 ]; then
+    systemctl restart "$SERVICE_NAME"
+    info "Service was already running and has been restarted."
+  else
+    info "Service is installed but not started yet."
+    info "Edit ${CONFIG_DIR}/config.yaml, then run: systemctl start ${SERVICE_NAME}"
+  fi
+}
+
 do_install() {
-    msg_info "开始安装/更新..."
-    check_root
-    check_deps
-    check_sys
-    
-    install_binary
-    install_service_file
-    install_config
-    
-    systemctl enable "$SERVICE_NAME"
-    msg_info "服务已设为开机自启。"
-    msg_info "请编辑 $CONFIG_DIR/config.yaml 文件，然后使用 'sudo $0 start' 启动服务。"
-    msg_info "安装/更新完成！"
+  local was_active=0
+
+  require_root
+  ensure_download_tool
+  detect_platform
+
+  if command_exists systemctl && systemctl is-active --quiet "$SERVICE_NAME"; then
+    was_active=1
+  fi
+
+  install_binary
+  install_config
+  write_service_file
+  reload_and_enable_service
+  restart_service_if_needed "$was_active"
+
+  info "Install/update completed."
 }
 
 do_uninstall() {
-    check_root
-    msg_info "开始卸载..."
-    
-    systemctl stop "$SERVICE_NAME" || true
-    systemctl disable "$SERVICE_NAME" || true
-    
-    rm -f "/etc/systemd/system/$SERVICE_NAME.service"
-    systemctl daemon-reload
-    rm -f "$INSTALL_DIR/$BINARY_NAME"
-    
-    msg_warn "主程序和服务已卸载。配置文件保留在 $CONFIG_DIR"
-    msg_info "卸载完成。"
+  require_root
+
+  if command_exists systemctl; then
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+
+  rm -f "$SERVICE_FILE"
+
+  if command_exists systemctl; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${INSTALL_DIR}/${BINARY_NAME}"
+
+  warn "Binary and service files were removed."
+  warn "Configuration was kept at ${CONFIG_DIR}"
 }
 
-# --- Main Logic ---
+require_systemctl() {
+  require_root
+
+  if ! command_exists systemctl; then
+    die "systemctl was not found on this machine."
+  fi
+}
+
+service_action() {
+  local action="$1"
+  require_systemctl
+  systemctl "$action" "$SERVICE_NAME"
+}
+
+show_logs() {
+  require_root
+
+  if ! command_exists journalctl; then
+    die "journalctl was not found on this machine."
+  fi
+
+  journalctl -u "$SERVICE_NAME" -f
+}
+
 usage() {
-    echo "用法: $0 [命令]"
-    echo
-    echo "命令:"
-    echo "  install, update   安装或更新程序"
-    echo "  uninstall         卸载程序"
-    echo "  start             启动服务"
-    echo "  stop              停止服务"
-    echo "  restart           重启服务"
-    echo "  status            查看服务状态"
-    echo "  log               实时查看日志"
-    echo
+  cat <<EOF
+Usage: ${PROGRAM_NAME} [command]
+
+Commands:
+  install, update   Install or update ${BINARY_NAME}
+  uninstall         Remove the binary and service file
+  start             Start the systemd service
+  stop              Stop the systemd service
+  restart           Restart the systemd service
+  status            Show the systemd service status
+  log, logs         Follow service logs
+  help              Show this help message
+
+If no command is provided, "install" is used by default.
+EOF
 }
 
 main() {
-    case "$1" in
-        install|update)
-            do_install
-            ;;
-        uninstall)
-            do_uninstall
-            ;;
-        start|stop|restart|status)
-            check_root
-            systemctl "$1" "$SERVICE_NAME"
-            ;;
-        log)
-            check_root
-            journalctl -u "$SERVICE_NAME" -f
-            ;;
-        "")
-            usage
-            ;;
-        *)
-            msg_err "未知命令: $1"
-            ;;
-    esac
+  local action="${1:-install}"
+
+  case "$action" in
+    install|update)
+      do_install
+      ;;
+    uninstall)
+      do_uninstall
+      ;;
+    start|stop|restart|status)
+      service_action "$action"
+      ;;
+    log|logs)
+      show_logs
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
 }
 
 main "$@"

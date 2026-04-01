@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,25 +15,68 @@ type cacheEntry struct {
 	expiry time.Time
 }
 
+type bootstrapServer struct {
+	network string
+	address string
+}
+
+func (s bootstrapServer) String() string {
+	if s.network == "" || s.network == "udp" {
+		return s.address
+	}
+	return s.network + "://" + s.address
+}
+
 type Bootstrapper struct {
-	servers  []string
+	servers  []bootstrapServer
 	counter  uint64
 	cache    sync.Map
 	cacheTTL time.Duration
 }
 
 func NewBootstrapper(servers []string) *Bootstrapper {
-	normalized := make([]string, len(servers))
-	for i, s := range servers {
-		if _, _, err := net.SplitHostPort(s); err != nil {
-			normalized[i] = net.JoinHostPort(s, "53")
-		} else {
-			normalized[i] = s
+	normalized := make([]bootstrapServer, 0, len(servers))
+	for _, s := range servers {
+		parsed := parseBootstrapServer(s)
+		if parsed.address == "" {
+			continue
 		}
+		normalized = append(normalized, parsed)
 	}
 	return &Bootstrapper{
 		servers:  normalized,
 		cacheTTL: 5 * time.Minute,
+	}
+}
+
+func parseBootstrapServer(server string) bootstrapServer {
+	raw := strings.TrimSpace(server)
+	if raw == "" {
+		return bootstrapServer{}
+	}
+
+	network := "udp"
+	if idx := strings.Index(raw, "://"); idx >= 0 {
+		switch strings.ToLower(raw[:idx]) {
+		case "tcp":
+			network = "tcp"
+		case "udp":
+			network = "udp"
+		}
+		raw = strings.TrimSpace(raw[idx+3:])
+	}
+
+	if raw == "" {
+		return bootstrapServer{}
+	}
+
+	if _, _, err := net.SplitHostPort(raw); err != nil {
+		raw = net.JoinHostPort(raw, "53")
+	}
+
+	return bootstrapServer{
+		network: network,
+		address: raw,
 	}
 }
 
@@ -89,7 +133,7 @@ func (b *Bootstrapper) lookupWithRetry(ctx context.Context, host string) (string
 				d := net.Dialer{
 					Timeout: 3 * time.Second,
 				}
-				return d.DialContext(ctx, "udp", server)
+				return d.DialContext(ctx, server.network, server.address)
 			},
 		}
 
