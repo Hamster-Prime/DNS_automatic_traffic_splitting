@@ -33,6 +33,7 @@ type DashboardStats struct {
 	UptimeSeconds    int64            `json:"uptime_seconds"`
 	MemoryUsageMB    float64          `json:"memory_usage_mb"`
 	NumGoroutines    int              `json:"num_goroutines"`
+	QPS              float64          `json:"qps"`
 	TotalQueries     int64            `json:"total_queries"`
 	TotalCN          int64            `json:"total_cn"`
 	TotalOverseas    int64            `json:"total_overseas"`
@@ -478,6 +479,7 @@ func StartWebServer(mgr *manager.ServiceManager) {
 			UptimeSeconds:    int64(time.Since(stats.StartTime).Seconds()),
 			MemoryUsageMB:    float64(m.Alloc) / 1024 / 1024,
 			NumGoroutines:    runtime.NumGoroutine(),
+			QPS:              stats.QPS,
 			TotalQueries:     stats.TotalQueries,
 			TotalCN:          stats.TotalCN,
 			TotalOverseas:    stats.TotalOverseas,

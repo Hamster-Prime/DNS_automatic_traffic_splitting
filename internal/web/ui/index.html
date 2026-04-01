@@ -334,8 +334,8 @@
                                             </div>
                                             <div class="bg-purple-50 dark:bg-purple-900/20 rounded-lg p-2 border border-purple-100 dark:border-purple-800/30">
                                                 <div class="flex justify-between items-center">
-                                                    <span class="text-xs text-purple-600 dark:text-purple-400 font-medium">Goroutines</span>
-                                                    <span class="text-sm font-bold text-slate-700 dark:text-slate-200 font-mono">{{ stats.num_goroutines }}</span>
+                                                    <span class="text-xs text-purple-600 dark:text-purple-400 font-medium">QPS</span>
+                                                    <span class="text-sm font-bold text-slate-700 dark:text-slate-200 font-mono">{{ formatQPS(stats.qps) }} req/s</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -1313,6 +1313,7 @@ const app = Vue.createApp({
                 query_log: { enabled: false, max_history: 5000, save_to_file: false, file: "" }
             },
             stats: {
+                qps: 0,
                 upstream_stats: [],
                 top_clients: {},
                 top_domains: {}
@@ -1395,6 +1396,7 @@ const app = Vue.createApp({
              return d.toLocaleTimeString('zh-CN', { hour12: false }) + "." + d.getMilliseconds().toString().padStart(3, '0');
         },
         formatNumber(num) { return num ? num.toLocaleString() : 0; },
+        formatQPS(num) { return Number(num || 0).toFixed(1); },
         formatUptime(sec) {
             if (!sec) return "0s";
             const d = Math.floor(sec / 86400);

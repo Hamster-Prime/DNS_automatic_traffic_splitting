@@ -39,6 +39,7 @@ type Stats struct {
 	TotalQueries  int64            `json:"total_queries"`
 	TotalCN       int64            `json:"total_cn"`
 	TotalOverseas int64            `json:"total_overseas"`
+	QPS           float64          `json:"qps"`
 	TopClients    map[string]int64 `json:"top_clients"`
 	TopDomains    map[string]int64 `json:"top_domains"`
 }
@@ -51,10 +52,12 @@ type QueryLogger struct {
 	nextID     int64
 	filePath   string
 	saveToFile bool
+	recentLogs []time.Time
 	stats      Stats
 }
 
 const maxMemoryLogs = 5000
+const qpsWindow = 10 * time.Second
 
 func NewQueryLogger(maxSizeMB int, filePath string, saveToFile bool) *QueryLogger {
 	if maxSizeMB <= 0 {
@@ -112,6 +115,7 @@ func (l *QueryLogger) AddLog(entry *LogEntry) {
 		entry.Time = time.Now()
 	}
 
+	l.recordRecentLog(entry.Time)
 	l.updateStats(entry)
 	l.addToMemory(entry)
 
@@ -135,6 +139,19 @@ func (l *QueryLogger) addToMemory(entry *LogEntry) {
 	l.logs = append(l.logs, entry)
 	if len(l.logs) > maxMemoryLogs {
 		l.logs = l.logs[1:]
+	}
+}
+
+func (l *QueryLogger) recordRecentLog(ts time.Time) {
+	l.recentLogs = append(l.recentLogs, ts)
+
+	cutoff := ts.Add(-qpsWindow)
+	firstValid := 0
+	for firstValid < len(l.recentLogs) && l.recentLogs[firstValid].Before(cutoff) {
+		firstValid++
+	}
+	if firstValid > 0 {
+		l.recentLogs = l.recentLogs[firstValid:]
 	}
 }
 
@@ -385,6 +402,7 @@ func (l *QueryLogger) GetStats() Stats {
 	defer l.mu.RUnlock()
 
 	s := l.stats
+	s.QPS = l.currentQPS(time.Now())
 	s.TopClients = make(map[string]int64, len(l.stats.TopClients))
 	for k, v := range l.stats.TopClients {
 		s.TopClients[k] = v
@@ -395,6 +413,23 @@ func (l *QueryLogger) GetStats() Stats {
 	}
 
 	return s
+}
+
+func (l *QueryLogger) currentQPS(now time.Time) float64 {
+	if len(l.recentLogs) == 0 {
+		return 0
+	}
+
+	cutoff := now.Add(-qpsWindow)
+	recentCount := 0
+	for i := len(l.recentLogs) - 1; i >= 0; i-- {
+		if l.recentLogs[i].Before(cutoff) {
+			break
+		}
+		recentCount++
+	}
+
+	return float64(recentCount) / qpsWindow.Seconds()
 }
 
 func (l *QueryLogger) Clear() {
