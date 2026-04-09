@@ -104,3 +104,54 @@ func TestSaveConfigWritesListenAddressSeparately(t *testing.T) {
 		t.Fatalf("reloaded Listen.DNSUDP = %q, want %q", got, "11153")
 	}
 }
+
+func TestLoadConfigRespectsExplicitQueryLogDisable(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`query_log:
+  enabled: false
+  max_history: 123
+`)
+
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.QueryLog.Enabled {
+		t.Fatalf("expected explicit query_log.enabled=false to be preserved")
+	}
+	if cfg.QueryLog.MaxHistory != 123 {
+		t.Fatalf("expected query_log.max_history to be loaded, got %d", cfg.QueryLog.MaxHistory)
+	}
+}
+
+func TestLoadConfigDefaultsQueryLogWhenFieldMissing(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`listen:
+  dns_udp: "53"
+`)
+
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if !cfg.QueryLog.Enabled {
+		t.Fatalf("expected query_log.enabled to default to true when omitted")
+	}
+	if cfg.QueryLog.MaxHistory != 5000 {
+		t.Fatalf("expected query_log.max_history default to 5000, got %d", cfg.QueryLog.MaxHistory)
+	}
+}

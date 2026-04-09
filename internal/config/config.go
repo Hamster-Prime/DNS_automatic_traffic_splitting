@@ -33,6 +33,7 @@ type TLSCertConfig struct {
 
 type QueryLogConfig struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	MaxHistory int    `yaml:"max_history" json:"max_history"`
 	File       string `yaml:"file" json:"file"`
 	MaxSizeMB  int    `yaml:"max_size_mb" json:"max_size_mb"`
 	SaveToFile bool   `yaml:"save_to_file" json:"save_to_file"`
@@ -126,7 +127,18 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	cfg.ConfigDir = configDir
-	cfg.QueryLog.Enabled = true
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("failed to inspect config defaults in %s: %w", absPath, err)
+	}
+
+	if !hasNestedKey(raw, "query_log", "enabled") {
+		cfg.QueryLog.Enabled = true
+	}
+	if cfg.QueryLog.MaxHistory <= 0 {
+		cfg.QueryLog.MaxHistory = 5000
+	}
 
 	normalizeListenConfig(&cfg.Listen)
 
@@ -168,6 +180,25 @@ func LoadConfig(configPath string) (*Config, error) {
 	cfg.GeoData.GeoSiteDat = resolvePath(cfg.GeoData.GeoSiteDat)
 
 	return &cfg, nil
+}
+
+func hasNestedKey(root map[string]interface{}, keys ...string) bool {
+	current := root
+	for i, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return false
+		}
+		if i == len(keys)-1 {
+			return true
+		}
+		next, ok := value.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		current = next
+	}
+	return false
 }
 
 func (c *Config) Save(configPath string) error {

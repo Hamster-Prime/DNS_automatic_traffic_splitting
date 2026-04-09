@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,25 +48,39 @@ type Stats struct {
 type QueryLogger struct {
 	mu         sync.RWMutex
 	fileMu     sync.Mutex
+	enabled    bool
 	logs       []*LogEntry
 	maxSizeMB  int
+	maxHistory int
 	nextID     int64
 	filePath   string
 	saveToFile bool
 	recentLogs []time.Time
 	stats      Stats
+
+	persistedLogCount int64
 }
 
-const maxMemoryLogs = 5000
+const defaultMaxMemoryLogs = 5000
 const qpsWindow = 10 * time.Second
 
-func NewQueryLogger(maxSizeMB int, filePath string, saveToFile bool) *QueryLogger {
+func NewQueryLogger(enabled bool, maxHistory, maxSizeMB int, filePath string, saveToFile bool) *QueryLogger {
 	if maxSizeMB <= 0 {
 		maxSizeMB = 1
 	}
+	if maxHistory <= 0 {
+		maxHistory = defaultMaxMemoryLogs
+	}
+	if !enabled {
+		saveToFile = false
+		filePath = ""
+	}
+
 	l := &QueryLogger{
-		logs:       make([]*LogEntry, 0, maxMemoryLogs),
+		enabled:    enabled,
+		logs:       make([]*LogEntry, 0, maxHistory),
 		maxSizeMB:  maxSizeMB,
+		maxHistory: maxHistory,
 		nextID:     1,
 		filePath:   filePath,
 		saveToFile: saveToFile,
@@ -76,7 +91,7 @@ func NewQueryLogger(maxSizeMB int, filePath string, saveToFile bool) *QueryLogge
 		},
 	}
 
-	if saveToFile && filePath != "" {
+	if enabled && saveToFile && filePath != "" {
 		l.restoreStatsFromFile()
 	}
 
@@ -95,9 +110,11 @@ func (l *QueryLogger) restoreStatsFromFile() {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
+		atomic.AddInt64(&l.persistedLogCount, 1)
+
 		var entry LogEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err == nil {
-			l.updateStats(&entry)
+			l.updateTotals(&entry)
 			if entry.ID >= l.nextID {
 				l.nextID = entry.ID + 1
 			}
@@ -106,6 +123,10 @@ func (l *QueryLogger) restoreStatsFromFile() {
 }
 
 func (l *QueryLogger) AddLog(entry *LogEntry) {
+	if !l.enabled {
+		return
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -116,7 +137,7 @@ func (l *QueryLogger) AddLog(entry *LogEntry) {
 	}
 
 	l.recordRecentLog(entry.Time)
-	l.updateStats(entry)
+	l.updateTotals(entry)
 	l.addToMemory(entry)
 
 	if l.saveToFile && l.filePath != "" {
@@ -124,21 +145,42 @@ func (l *QueryLogger) AddLog(entry *LogEntry) {
 	}
 }
 
-func (l *QueryLogger) updateStats(entry *LogEntry) {
+func (l *QueryLogger) updateTotals(entry *LogEntry) {
 	l.stats.TotalQueries++
 	if strings.Contains(entry.Upstream, "CN") {
 		l.stats.TotalCN++
 	} else if strings.Contains(entry.Upstream, "Overseas") {
 		l.stats.TotalOverseas++
 	}
-	l.stats.TopClients[entry.ClientIP]++
-	l.stats.TopDomains[entry.Domain]++
 }
 
 func (l *QueryLogger) addToMemory(entry *LogEntry) {
 	l.logs = append(l.logs, entry)
-	if len(l.logs) > maxMemoryLogs {
+	l.stats.TopClients[entry.ClientIP]++
+	l.stats.TopDomains[entry.Domain]++
+
+	if len(l.logs) > l.maxHistory {
+		evicted := l.logs[0]
 		l.logs = l.logs[1:]
+		l.decrementTopCounters(evicted)
+	}
+}
+
+func (l *QueryLogger) decrementTopCounters(entry *LogEntry) {
+	if entry == nil {
+		return
+	}
+
+	if count := l.stats.TopClients[entry.ClientIP] - 1; count > 0 {
+		l.stats.TopClients[entry.ClientIP] = count
+	} else {
+		delete(l.stats.TopClients, entry.ClientIP)
+	}
+
+	if count := l.stats.TopDomains[entry.Domain] - 1; count > 0 {
+		l.stats.TopDomains[entry.Domain] = count
+	} else {
+		delete(l.stats.TopDomains, entry.Domain)
 	}
 }
 
@@ -170,8 +212,11 @@ func (l *QueryLogger) appendToFile(entry LogEntry) {
 	fi, err := os.Stat(l.filePath)
 	if err == nil {
 		if fi.Size()+int64(len(data)) > limitBytes {
-			if err := l.pruneLogFile(limitBytes); err != nil {
+			remainingLines, err := l.pruneLogFile(limitBytes)
+			if err != nil {
 				log.Printf("Error pruning log file: %v", err)
+			} else {
+				atomic.StoreInt64(&l.persistedLogCount, remainingLines)
 			}
 		}
 	} else if !os.IsNotExist(err) {
@@ -188,33 +233,47 @@ func (l *QueryLogger) appendToFile(entry LogEntry) {
 
 	if _, err := f.Write(data); err != nil {
 		log.Printf("Error writing data to log file: %v", err)
+		return
 	}
+
+	atomic.AddInt64(&l.persistedLogCount, 1)
 }
 
-func (l *QueryLogger) pruneLogFile(limitBytes int64) (err error) {
+type countingWriter struct {
+	writer io.Writer
+	lines  int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.lines += int64(bytes.Count(p[:n], []byte{'\n'}))
+	return n, err
+}
+
+func (l *QueryLogger) pruneLogFile(limitBytes int64) (int64, error) {
 	targetSize := int64(float64(limitBytes) * 0.8)
 
 	f, err := os.Open(l.filePath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	fileSize := fi.Size()
 
 	if fileSize <= targetSize {
-		return nil
+		return atomic.LoadInt64(&l.persistedLogCount), nil
 	}
 
 	startPos := fileSize - targetSize
 	dir := filepath.Dir(l.filePath)
 	tmpFile, err := os.CreateTemp(dir, "querylog_*.tmp")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	tmpName := tmpFile.Name()
 
@@ -228,13 +287,13 @@ func (l *QueryLogger) pruneLogFile(limitBytes int64) (err error) {
 	}()
 
 	if _, err = f.Seek(startPos, 0); err != nil {
-		return err
+		return 0, err
 	}
 
 	buf := make([]byte, 1024)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
-		return err
+		return 0, err
 	}
 
 	copyStart := startPos
@@ -244,48 +303,69 @@ func (l *QueryLogger) pruneLogFile(limitBytes int64) (err error) {
 	}
 
 	if _, err = f.Seek(copyStart, 0); err != nil {
-		return err
+		return 0, err
 	}
 
-	if _, err = io.Copy(tmpFile, f); err != nil {
-		return err
+	counter := &countingWriter{writer: tmpFile}
+	if _, err = io.Copy(counter, f); err != nil {
+		return 0, err
 	}
 
 	f.Close()
 	tmpFile.Close()
 	tmpFile = nil
 
-	return os.Rename(tmpName, l.filePath)
+	if err := os.Rename(tmpName, l.filePath); err != nil {
+		return 0, err
+	}
+
+	return counter.lines, nil
 }
 
 func (l *QueryLogger) GetLogs(offset, limit int, search string) ([]*LogEntry, int64) {
+	if !l.enabled {
+		return nil, 0
+	}
+
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+
 	if l.saveToFile && l.filePath != "" {
-		fileLogs, total, err := l.readLogsFromFileBackwards(offset, limit, search)
+		totalHint := int64(-1)
+		stopAfter := 0
+		if search == "" {
+			totalHint = atomic.LoadInt64(&l.persistedLogCount)
+			stopAfter = offset + limit
+		}
+
+		fileLogs, total, err := l.readLogsFromFileBackwards(offset, limit, search, stopAfter, totalHint)
 		if err == nil {
 			return fileLogs, total
 		}
 	}
 
+	if search == "" {
+		total := len(l.logs)
+		if total == 0 || offset >= total {
+			return nil, int64(total)
+		}
+
+		result := make([]*LogEntry, 0, min(limit, total-offset))
+		for i := total - 1 - offset; i >= 0 && len(result) < limit; i-- {
+			result = append(result, l.logs[i])
+		}
+		return result, int64(total)
+	}
+
 	var result []*LogEntry
-	var count int64 = 0
+	var count int64
 	searchLower := strings.ToLower(search)
 
 	for i := len(l.logs) - 1; i >= 0; i-- {
 		entry := l.logs[i]
 
-		if searchLower != "" {
-			match := strings.Contains(strings.ToLower(entry.ClientIP), searchLower) ||
-				strings.Contains(strings.ToLower(entry.DownstreamECS), searchLower) ||
-				strings.Contains(strings.ToLower(entry.Domain), searchLower) ||
-				strings.Contains(strings.ToLower(entry.Type), searchLower) ||
-				strings.Contains(strings.ToLower(entry.Upstream), searchLower) ||
-				strings.Contains(strings.ToLower(entry.Answer), searchLower) ||
-				strings.Contains(strings.ToLower(entry.Status), searchLower)
-			if !match {
-				continue
-			}
+		if !matches(entry, searchLower) {
+			continue
 		}
 
 		if count >= int64(offset) && len(result) < limit {
@@ -297,7 +377,7 @@ func (l *QueryLogger) GetLogs(offset, limit int, search string) ([]*LogEntry, in
 	return result, count
 }
 
-func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string) ([]*LogEntry, int64, error) {
+func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string, stopAfter int, totalHint int64) ([]*LogEntry, int64, error) {
 	l.fileMu.Lock()
 	defer l.fileMu.Unlock()
 
@@ -314,7 +394,7 @@ func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string
 
 	fileSize := stat.Size()
 	var result []*LogEntry
-	var matchCount int64 = 0
+	var matchCount int64
 
 	buf := make([]byte, 4096)
 	pos := fileSize
@@ -322,14 +402,27 @@ func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string
 
 	searchLower := strings.ToLower(search)
 
+	processLine := func(reversed []byte) bool {
+		entry := parseReverseLine(reversed)
+		if entry == nil || !matches(entry, searchLower) {
+			return false
+		}
+
+		if matchCount >= int64(offset) && len(result) < limit {
+			result = append(result, entry)
+		}
+		matchCount++
+
+		return stopAfter > 0 && totalHint >= 0 && searchLower == "" && matchCount >= int64(stopAfter)
+	}
+
 	for pos > 0 {
 		readSize := int64(len(buf))
 		if pos < readSize {
 			readSize = pos
 		}
 		pos -= readSize
-		_, err := file.Seek(pos, 0)
-		if err != nil {
+		if _, err := file.Seek(pos, 0); err != nil {
 			break
 		}
 
@@ -342,12 +435,8 @@ func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string
 			b := buf[i]
 			if b == '\n' {
 				if len(line) > 0 {
-					entry := parseReverseLine(line)
-					if entry != nil && matches(entry, searchLower) {
-						if matchCount >= int64(offset) && len(result) < limit {
-							result = append(result, entry)
-						}
-						matchCount++
+					if processLine(line) {
+						return result, totalHint, nil
 					}
 					line = line[:0]
 				}
@@ -358,13 +447,13 @@ func (l *QueryLogger) readLogsFromFileBackwards(offset, limit int, search string
 	}
 
 	if len(line) > 0 {
-		entry := parseReverseLine(line)
-		if entry != nil && matches(entry, searchLower) {
-			if matchCount >= int64(offset) && len(result) < limit {
-				result = append(result, entry)
-			}
-			matchCount++
+		if processLine(line) {
+			return result, totalHint, nil
 		}
+	}
+
+	if totalHint >= 0 && searchLower == "" {
+		return result, totalHint, nil
 	}
 
 	return result, matchCount, nil
@@ -435,5 +524,16 @@ func (l *QueryLogger) currentQPS(now time.Time) float64 {
 func (l *QueryLogger) Clear() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.logs = make([]*LogEntry, 0, maxMemoryLogs)
+
+	l.logs = make([]*LogEntry, 0, l.maxHistory)
+	l.recentLogs = nil
+	l.stats.TopClients = make(map[string]int64)
+	l.stats.TopDomains = make(map[string]int64)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
