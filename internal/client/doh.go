@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"doh-autoproxy/internal/config"
@@ -21,9 +22,16 @@ import (
 )
 
 type DoHClient struct {
-	cfg          config.UpstreamServer
-	bootstrapper *resolver.Bootstrapper
-	httpClient   *http.Client
+	cfg            config.UpstreamServer
+	bootstrapper   *resolver.Bootstrapper
+	httpClient     *http.Client
+	httpTransport  *http.Transport
+	http3Transport *http3.Transport
+	quicTransport  *quic.Transport
+	udpConn        *net.UDPConn
+	h3InitOnce     sync.Once
+	h3InitErr      error
+	closeOnce      sync.Once
 }
 
 func NewDoHClient(cfg config.UpstreamServer, b *resolver.Bootstrapper) *DoHClient {
@@ -41,66 +49,92 @@ func (c *DoHClient) initHTTPClient() {
 	}
 
 	if c.cfg.EnableH3 {
-		c.httpClient = &http.Client{
-			Transport: &http3.Transport{
-				TLSClientConfig: tlsConfig,
-				QUICConfig: &quic.Config{
-					MaxIdleTimeout: 30 * time.Second,
-				},
-				Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-					host, port, err := net.SplitHostPort(addr)
-					if err != nil {
-						return nil, err
-					}
-					ip, err := c.bootstrapper.LookupIP(ctx, host)
-					if err != nil {
-						return nil, fmt.Errorf("H3 bootstrap解析失败: %w", err)
-					}
-					resolvedAddr := net.JoinHostPort(ip, port)
-					udpAddr, err := net.ResolveUDPAddr("udp", resolvedAddr)
-					if err != nil {
-						return nil, err
-					}
-					udpConn, err := net.ListenUDP("udp", nil)
-					if err != nil {
-						return nil, err
-					}
-					tr := &quic.Transport{Conn: udpConn}
-					return tr.Dial(ctx, udpAddr, tlsCfg, cfg)
-				},
+		h3Transport := &http3.Transport{
+			TLSClientConfig: tlsConfig,
+			QUICConfig: &quic.Config{
+				MaxIdleTimeout: 30 * time.Second,
 			},
-			Timeout: 10 * time.Second,
+		}
+		h3Transport.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			transport, err := c.getOrCreateQUICTransport()
+			if err != nil {
+				return nil, err
+			}
+
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ip, err := c.bootstrapper.LookupIP(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("H3 bootstrap解析失败: %w", err)
+			}
+			udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, port))
+			if err != nil {
+				return nil, err
+			}
+
+			return transport.Dial(ctx, udpAddr, tlsCfg, cfg)
+		}
+
+		c.http3Transport = h3Transport
+		c.httpClient = &http.Client{
+			Transport: h3Transport,
+			Timeout:   10 * time.Second,
 		}
 		return
 	}
 
-	c.httpClient = &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
-				ip, err := c.bootstrapper.LookupIP(ctx, host)
-				if err != nil {
-					return nil, err
-				}
-				d := net.Dialer{
-					Timeout:   30 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}
-				return d.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			},
-			ForceAttemptHTTP2:     true,
-			TLSClientConfig:       tlsConfig,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
+	c.httpTransport = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ip, err := c.bootstrapper.LookupIP(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			d := net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+			return d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 		},
-		Timeout: 10 * time.Second,
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig:       tlsConfig,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
+
+	c.httpClient = &http.Client{
+		Transport: c.httpTransport,
+		Timeout:   10 * time.Second,
+	}
+}
+
+func (c *DoHClient) getOrCreateQUICTransport() (*quic.Transport, error) {
+	c.h3InitOnce.Do(func() {
+		udpConn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			c.h3InitErr = err
+			return
+		}
+		c.udpConn = udpConn
+		c.quicTransport = &quic.Transport{Conn: udpConn}
+	})
+
+	if c.h3InitErr != nil {
+		return nil, c.h3InitErr
+	}
+	if c.quicTransport == nil {
+		return nil, fmt.Errorf("HTTP/3 transport unavailable")
+	}
+
+	return c.quicTransport, nil
 }
 
 func (c *DoHClient) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
@@ -158,4 +192,31 @@ func (c *DoHClient) Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 	}
 
 	return responseMsg, nil
+}
+
+func (c *DoHClient) Close() error {
+	var firstErr error
+
+	c.closeOnce.Do(func() {
+		if c.httpTransport != nil {
+			c.httpTransport.CloseIdleConnections()
+		}
+		if c.http3Transport != nil {
+			if err := c.http3Transport.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if c.quicTransport != nil {
+			if err := c.quicTransport.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if c.udpConn != nil {
+			if err := c.udpConn.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	})
+
+	return firstErr
 }

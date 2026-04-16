@@ -72,3 +72,7 @@ func (s *StatsClient) GetStats() map[string]interface{} {
 		"avg_duration_ms": avg,
 	}
 }
+
+func (s *StatsClient) Close() error {
+	return CloseDNSClient(s.Client)
+}

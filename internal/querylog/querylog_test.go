@@ -2,6 +2,10 @@ package querylog
 
 import (
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,5 +75,58 @@ func TestTopStatsTrackBoundedHistory(t *testing.T) {
 	}
 	if len(logs) != 2 || logs[0].Domain != "third.example" || logs[1].Domain != "second.example" {
 		t.Fatalf("unexpected bounded log order: %#v", logs)
+	}
+}
+
+func TestSaveToFileUsesBoundedWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "query.log")
+	before := runtime.NumGoroutine()
+
+	logger := NewQueryLogger(true, 32, 10, path, true)
+	t.Cleanup(func() {
+		if err := logger.Close(); err != nil {
+			t.Fatalf("close logger: %v", err)
+		}
+	})
+
+	for i := 0; i < 2000; i++ {
+		logger.AddLog(&LogEntry{
+			ClientIP: "127.0.0.1",
+			Domain:   "example.com",
+			Upstream: "Rule(CN)",
+			Status:   "NOERROR",
+		})
+	}
+
+	after := runtime.NumGoroutine()
+	if delta := after - before; delta > 20 {
+		t.Fatalf("expected bounded writer goroutines, got delta=%d (before=%d after=%d)", delta, before, after)
+	}
+}
+
+func TestCloseFlushesQueuedLogs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "query.log")
+	logger := NewQueryLogger(true, 32, 10, path, true)
+
+	for i := 0; i < 50; i++ {
+		logger.AddLog(&LogEntry{
+			ClientIP: "127.0.0.1",
+			Domain:   "flush.example",
+			Upstream: "Rule(CN)",
+			Status:   "NOERROR",
+		})
+	}
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+
+	if lines := strings.Count(string(data), "\n"); lines != 50 {
+		t.Fatalf("expected 50 persisted lines, got %d", lines)
 	}
 }

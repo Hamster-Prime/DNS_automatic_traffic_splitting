@@ -95,6 +95,26 @@ func (r *Router) GetUpstreamStats() []interface{} {
 	return stats
 }
 
+func (r *Router) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	var firstErr error
+	for _, s := range r.cnStats {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, s := range r.overseasStats {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	return firstErr
+}
+
 func (r *Router) Route(ctx context.Context, req *dns.Msg, clientIP string) (*dns.Msg, error) {
 	start := time.Now()
 	if len(req.Question) == 0 {

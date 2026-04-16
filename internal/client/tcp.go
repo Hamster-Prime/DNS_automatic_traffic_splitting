@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"doh-autoproxy/internal/config"
@@ -18,6 +19,7 @@ type TCPClient struct {
 	bootstrapper *resolver.Bootstrapper
 	pool         chan *dns.Conn
 	poolInit     sync.Once
+	closed       atomic.Bool
 }
 
 func NewTCPClient(cfg config.UpstreamServer, b *resolver.Bootstrapper) *TCPClient {
@@ -74,6 +76,13 @@ func (c *TCPClient) resolvePipeline(ctx context.Context, req *dns.Msg) (*dns.Msg
 	}
 
 	defer func() {
+		if conn == nil {
+			return
+		}
+		if c.closed.Load() {
+			conn.Close()
+			return
+		}
 		c.pool <- conn
 	}()
 
@@ -148,4 +157,26 @@ func (c *TCPClient) resolveAddr(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("bootstrap failed: %w", err)
 	}
 	return net.JoinHostPort(ip, port), nil
+}
+
+func (c *TCPClient) Close() error {
+	c.closed.Store(true)
+	if c.pool == nil {
+		return nil
+	}
+
+	var firstErr error
+	for {
+		select {
+		case conn := <-c.pool:
+			if conn == nil {
+				continue
+			}
+			if err := conn.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		default:
+			return firstErr
+		}
+	}
 }

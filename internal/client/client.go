@@ -15,6 +15,10 @@ type DNSClient interface {
 	Resolve(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 }
 
+type lifecycleDNSClient interface {
+	Close() error
+}
+
 func NewDNSClient(cfg config.UpstreamServer, bootstrapper *resolver.Bootstrapper) (DNSClient, error) {
 	switch cfg.Protocol {
 	case "udp":
@@ -30,6 +34,16 @@ func NewDNSClient(cfg config.UpstreamServer, bootstrapper *resolver.Bootstrapper
 	default:
 		return nil, fmt.Errorf("不支持的上游协议: %s", cfg.Protocol)
 	}
+}
+
+func CloseDNSClient(c DNSClient) error {
+	if c == nil {
+		return nil
+	}
+	if closer, ok := c.(lifecycleDNSClient); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func ensureECS(req *dns.Msg, ecsIP string) {

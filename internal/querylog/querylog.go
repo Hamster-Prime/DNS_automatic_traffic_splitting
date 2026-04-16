@@ -59,10 +59,16 @@ type QueryLogger struct {
 	stats      Stats
 
 	persistedLogCount int64
+	fileQueue         chan LogEntry
+	stopWriter        chan struct{}
+	writerDone        chan struct{}
+	closeOnce         sync.Once
+	closed            atomic.Bool
 }
 
 const defaultMaxMemoryLogs = 5000
 const qpsWindow = 10 * time.Second
+const maxFileWriteQueueSize = 1024
 
 func NewQueryLogger(enabled bool, maxHistory, maxSizeMB int, filePath string, saveToFile bool) *QueryLogger {
 	if maxSizeMB <= 0 {
@@ -93,9 +99,44 @@ func NewQueryLogger(enabled bool, maxHistory, maxSizeMB int, filePath string, sa
 
 	if enabled && saveToFile && filePath != "" {
 		l.restoreStatsFromFile()
+		l.startFileWriter()
 	}
 
 	return l
+}
+
+func (l *QueryLogger) startFileWriter() {
+	queueSize := l.maxHistory
+	if queueSize > maxFileWriteQueueSize {
+		queueSize = maxFileWriteQueueSize
+	}
+	if queueSize < 64 {
+		queueSize = 64
+	}
+
+	l.fileQueue = make(chan LogEntry, queueSize)
+	l.stopWriter = make(chan struct{})
+	l.writerDone = make(chan struct{})
+
+	go func() {
+		defer close(l.writerDone)
+
+		for {
+			select {
+			case entry := <-l.fileQueue:
+				l.appendToFile(entry)
+			case <-l.stopWriter:
+				for {
+					select {
+					case entry := <-l.fileQueue:
+						l.appendToFile(entry)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
 }
 
 func (l *QueryLogger) restoreStatsFromFile() {
@@ -123,12 +164,15 @@ func (l *QueryLogger) restoreStatsFromFile() {
 }
 
 func (l *QueryLogger) AddLog(entry *LogEntry) {
-	if !l.enabled {
+	if !l.enabled || l.closed.Load() {
 		return
 	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	if l.closed.Load() {
+		l.mu.Unlock()
+		return
+	}
 
 	entry.ID = l.nextID
 	l.nextID++
@@ -140,9 +184,50 @@ func (l *QueryLogger) AddLog(entry *LogEntry) {
 	l.updateTotals(entry)
 	l.addToMemory(entry)
 
-	if l.saveToFile && l.filePath != "" {
-		go l.appendToFile(*entry)
+	shouldPersist := l.saveToFile && l.filePath != "" && l.fileQueue != nil
+	var entryCopy LogEntry
+	if shouldPersist {
+		entryCopy = cloneEntry(*entry)
 	}
+	l.mu.Unlock()
+
+	if shouldPersist {
+		l.enqueueFileWrite(entryCopy)
+	}
+}
+
+func cloneEntry(entry LogEntry) LogEntry {
+	if len(entry.AnswerRecords) > 0 {
+		entry.AnswerRecords = append([]AnswerRecord(nil), entry.AnswerRecords...)
+	}
+	return entry
+}
+
+func (l *QueryLogger) enqueueFileWrite(entry LogEntry) {
+	if l.fileQueue == nil || l.closed.Load() {
+		return
+	}
+
+	select {
+	case l.fileQueue <- entry:
+	default:
+		// 队列满时直接回退到同步写，避免额外 goroutine 堆积。
+		l.appendToFile(entry)
+	}
+}
+
+func (l *QueryLogger) Close() error {
+	l.closeOnce.Do(func() {
+		l.closed.Store(true)
+		if l.stopWriter != nil {
+			close(l.stopWriter)
+		}
+		if l.writerDone != nil {
+			<-l.writerDone
+		}
+	})
+
+	return nil
 }
 
 func (l *QueryLogger) updateTotals(entry *LogEntry) {
@@ -155,15 +240,23 @@ func (l *QueryLogger) updateTotals(entry *LogEntry) {
 }
 
 func (l *QueryLogger) addToMemory(entry *LogEntry) {
-	l.logs = append(l.logs, entry)
 	l.stats.TopClients[entry.ClientIP]++
 	l.stats.TopDomains[entry.Domain]++
 
-	if len(l.logs) > l.maxHistory {
-		evicted := l.logs[0]
-		l.logs = l.logs[1:]
-		l.decrementTopCounters(evicted)
+	if len(l.logs) < l.maxHistory {
+		l.logs = append(l.logs, entry)
+		return
 	}
+
+	if len(l.logs) == 0 {
+		l.logs = append(l.logs, entry)
+		return
+	}
+
+	evicted := l.logs[0]
+	copy(l.logs, l.logs[1:])
+	l.logs[len(l.logs)-1] = entry
+	l.decrementTopCounters(evicted)
 }
 
 func (l *QueryLogger) decrementTopCounters(entry *LogEntry) {
@@ -193,7 +286,10 @@ func (l *QueryLogger) recordRecentLog(ts time.Time) {
 		firstValid++
 	}
 	if firstValid > 0 {
-		l.recentLogs = l.recentLogs[firstValid:]
+		remaining := len(l.recentLogs) - firstValid
+		copy(l.recentLogs, l.recentLogs[firstValid:])
+		clear(l.recentLogs[remaining:])
+		l.recentLogs = l.recentLogs[:remaining]
 	}
 }
 

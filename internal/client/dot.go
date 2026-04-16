@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"doh-autoproxy/internal/config"
@@ -19,6 +20,7 @@ type DoTClient struct {
 	bootstrapper *resolver.Bootstrapper
 	pool         chan *dns.Conn
 	poolInit     sync.Once
+	closed       atomic.Bool
 }
 
 func NewDoTClient(cfg config.UpstreamServer, b *resolver.Bootstrapper) *DoTClient {
@@ -76,6 +78,13 @@ func (c *DoTClient) resolvePipeline(ctx context.Context, req *dns.Msg) (*dns.Msg
 	}
 
 	defer func() {
+		if conn == nil {
+			return
+		}
+		if c.closed.Load() {
+			conn.Close()
+			return
+		}
 		c.pool <- conn
 	}()
 
@@ -165,4 +174,26 @@ func (c *DoTClient) dialConn(ctx context.Context) (*dns.Conn, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+func (c *DoTClient) Close() error {
+	c.closed.Store(true)
+	if c.pool == nil {
+		return nil
+	}
+
+	var firstErr error
+	for {
+		select {
+		case conn := <-c.pool:
+			if conn == nil {
+				continue
+			}
+			if err := conn.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		default:
+			return firstErr
+		}
+	}
 }
