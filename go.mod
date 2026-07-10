@@ -6,7 +6,7 @@ require (
 	github.com/metacubex/geo v0.0.0-20240718103914-a4db326ccfd7
 	github.com/miekg/dns v1.1.68
 	github.com/quic-go/quic-go v0.59.1
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
